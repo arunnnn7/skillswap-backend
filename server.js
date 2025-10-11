@@ -19,28 +19,21 @@ const profileRoutes = require('./routes/profile');
 
 const app = express();
 const server = http.createServer(app);
-const allowedOrigin = process.env.FRONTEND_URL || '*'
-const io = new Server(server, {
-  cors: {
-    origin: allowedOrigin,
-    methods: ['GET', 'POST'],
-    credentials: true
-  }
-});
 
-// Map of userId -> array of socket ids (supports multi-tab)
-const userSockets = {};
-app.set('userSockets', userSockets);
-app.set('io', io);
+// 🚨 Production: exact frontend URL (Vercel)
+const allowedOrigin = "https://skillswap-frontend-neon.vercel.app";
+if (!allowedOrigin) console.warn('FRONTEND_URL not set. Set it in Render environment variables.');
 
-// Restrict CORS to deployed frontend origin when available
-const frontendUrl = process.env.FRONTEND_URL || '*'
-app.use(cors({ origin: frontendUrl, credentials: true }));
+app.use(cors({
+  origin: allowedOrigin,
+  credentials: true
+}));
+
 app.use(express.json());
 
+// Routes
 app.use('/api/auth', authRoutes);
 app.use('/api/skills', skillsRoutes);
-// new v2 skills endpoints (offered/wanted/browse/search)
 app.use('/api/skills', skillsV2Routes);
 app.use('/api/swaps', swapsRoutes);
 app.use('/api/match', matchRoutes);
@@ -49,26 +42,37 @@ app.use('/api/users', usersRoutes);
 app.use('/api/dashboard', dashboardRoutes);
 app.use('/api/profile', profileRoutes);
 
-// basic health
+// Health check
 app.get('/', (req, res) => res.send({ ok: true, msg: 'Skill Swap API' }));
 
-// Simple socket.io signaling for WebRTC
+// Socket.io for WebRTC signaling
+const io = new Server(server, {
+  cors: {
+    origin: allowedOrigin,
+    methods: ['GET', 'POST'],
+    credentials: true
+  }
+});
+
+// Map userId -> socket ids
+const userSockets = {};
+app.set('userSockets', userSockets);
+app.set('io', io);
+
 io.on('connection', (socket) => {
-  console.log('Socket connected:', socket.id);
-  console.log('Handshake origin:', socket.handshake.headers.origin)
+  console.log('Socket connected:', socket.id, 'Origin:', socket.handshake.headers.origin);
 
   socket.on('join-room', ({ roomId, userId }) => {
     socket.join(roomId);
     socket.to(roomId).emit('user-joined', { userId });
   });
 
-  // clients can announce their userId so server can map socket ids to users
   socket.on('register-user', ({ userId }) => {
-    if (!userId) return
-    userSockets[userId] = userSockets[userId] || []
-    if (!userSockets[userId].includes(socket.id)) userSockets[userId].push(socket.id)
-    socket.userId = userId
-  })
+    if (!userId) return;
+    userSockets[userId] = userSockets[userId] || [];
+    if (!userSockets[userId].includes(socket.id)) userSockets[userId].push(socket.id);
+    socket.userId = userId;
+  });
 
   socket.on('signal', ({ roomId, data }) => {
     socket.to(roomId).emit('signal', data);
@@ -76,11 +80,10 @@ io.on('connection', (socket) => {
 
   socket.on('disconnect', () => {
     console.log('Socket disconnected:', socket.id);
-    // cleanup userSockets mapping
-    const uid = socket.userId
-    if (uid && userSockets[uid]){
-      userSockets[uid] = userSockets[uid].filter(sid => sid !== socket.id)
-      if (userSockets[uid].length === 0) delete userSockets[uid]
+    const uid = socket.userId;
+    if (uid && userSockets[uid]) {
+      userSockets[uid] = userSockets[uid].filter(sid => sid !== socket.id);
+      if (userSockets[uid].length === 0) delete userSockets[uid];
     }
   });
 });
@@ -89,9 +92,7 @@ const PORT = process.env.PORT || 5000;
 
 async function start() {
   const mongoUri = process.env.MONGO_URI;
-  if (!mongoUri) {
-    console.warn('MONGO_URI not set in environment; server will still start but DB will fail until set.');
-  }
+  if (!mongoUri) console.warn('MONGO_URI not set in environment variables.');
 
   try {
     if (mongoUri) await mongoose.connect(mongoUri);
