@@ -20,9 +20,8 @@ const profileRoutes = require('./routes/profile');
 const app = express();
 const server = http.createServer(app);
 
-// 🚨 Production: exact frontend URL (Vercel)
-const allowedOrigin = "https://skillswap-frontend-neon.vercel.app";
-if (!allowedOrigin) console.warn('FRONTEND_URL not set. Set it in Render environment variables.');
+// ✅ Use environment variable for frontend URL
+const allowedOrigin = process.env.FRONTEND_URL || "https://skillswap-frontend-neon.vercel.app";
 
 app.use(cors({
   origin: allowedOrigin,
