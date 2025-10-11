@@ -51,8 +51,8 @@ const io = new Server(server, {
   }
 });
 
-// Map userId -> socket ids
-const userSockets = {};
+
+const userSockets={};
 app.set('userSockets', userSockets);
 app.set('io', io);
 
