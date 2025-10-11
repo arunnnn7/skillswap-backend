@@ -19,10 +19,12 @@ const profileRoutes = require('./routes/profile');
 
 const app = express();
 const server = http.createServer(app);
+const allowedOrigin = process.env.FRONTEND_URL || '*'
 const io = new Server(server, {
   cors: {
-    origin: '*',
-    methods: ['GET', 'POST']
+    origin: allowedOrigin,
+    methods: ['GET', 'POST'],
+    credentials: true
   }
 });
 
@@ -31,7 +33,9 @@ const userSockets = {};
 app.set('userSockets', userSockets);
 app.set('io', io);
 
-app.use(cors());
+// Restrict CORS to deployed frontend origin when available
+const frontendUrl = process.env.FRONTEND_URL || '*'
+app.use(cors({ origin: frontendUrl, credentials: true }));
 app.use(express.json());
 
 app.use('/api/auth', authRoutes);
@@ -51,6 +55,7 @@ app.get('/', (req, res) => res.send({ ok: true, msg: 'Skill Swap API' }));
 // Simple socket.io signaling for WebRTC
 io.on('connection', (socket) => {
   console.log('Socket connected:', socket.id);
+  console.log('Handshake origin:', socket.handshake.headers.origin)
 
   socket.on('join-room', ({ roomId, userId }) => {
     socket.join(roomId);
