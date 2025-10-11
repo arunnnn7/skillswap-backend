@@ -23,10 +23,8 @@ const server = http.createServer(app);
 // ✅ Use environment variable for frontend URL
 const allowedOrigin = process.env.FRONTEND_URL || "https://skillswap-frontend-neon.vercel.app";
 
-app.use(cors({
-  origin: allowedOrigin,
-  credentials: true
-}));
+app.use(cors({ origin: process.env.FRONTEND_URL, credentials: true }));
+
 
 app.use(express.json());
 
