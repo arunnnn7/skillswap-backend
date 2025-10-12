@@ -82,10 +82,12 @@ const io = new Server(server, {
 
 const userSockets = {};
 const roomUsers = {}; // Track users in rooms
+const userNames = {}; // Track user names for display
 const activeCalls = {}; // Track active calls
 
 app.set('userSockets', userSockets);
 app.set('roomUsers', roomUsers);
+app.set('userNames', userNames);
 app.set('activeCalls', activeCalls);
 app.set('io', io);
 
@@ -93,7 +95,7 @@ io.on('connection', (socket) => {
   console.log('Socket connected:', socket.id);
 
   // Register user with their socket
-  socket.on('register-user', ({ userId }) => {
+  socket.on('register-user', ({ userId, userName }) => {
     if (!userId) return;
     
     console.log(`Registering user ${userId} with socket ${socket.id}`);
@@ -106,13 +108,26 @@ io.on('connection', (socket) => {
       userSockets[userId].push(socket.id);
     }
     
+    // Store user name for display
+    if (userName) {
+      userNames[userId] = userName;
+      console.log(`✅ Stored user name for ${userId}: ${userName}`);
+    }
+    
     socket.userId = userId;
     console.log(`User ${userId} now has ${userSockets[userId].length} sockets`);
   });
 
   // Join a video room - IMPROVED VERSION
-  socket.on('join-room', ({ roomId, userId }) => {
-    console.log(`User ${userId} joining room ${roomId}`);
+  socket.on('join-room', ({ roomId, userId, userName }) => {
+    // Validate user ID
+    if (!userId || userId === 'anonymous' || userId === 'undefined' || userId === 'null') {
+      console.error(`❌ Invalid user ID attempted to join room ${roomId}:`, userId);
+      socket.emit('join-error', { error: 'Invalid user ID' });
+      return;
+    }
+    
+    console.log(`User ${userId} (${userName || 'unknown'}) joining room ${roomId}`);
     
     socket.join(roomId);
     
@@ -122,25 +137,47 @@ io.on('connection', (socket) => {
     }
     roomUsers[roomId].add(userId);
     
-    // Notify others in the room
+    // Store user name if provided
+    if (userName) {
+      userNames[userId] = userName;
+    }
+    
+    // Notify others in the room with user info
     socket.to(roomId).emit('user-joined', { 
       userId,
+      userName: userNames[userId] || `User-${userId.substr(0, 8)}`,
       socketId: socket.id 
     });
     
     // Acknowledge join with room info
+    const usersArray = Array.from(roomUsers[roomId]);
+    const isCaller = usersArray.length === 1; // First user is caller
+    
     socket.emit('joined-room', { 
       roomId, 
       success: true,
-      usersInRoom: Array.from(roomUsers[roomId]),
-      isCaller: roomUsers[roomId].size === 1 // First user is caller
+      usersInRoom: usersArray,
+      isCaller: isCaller,
+      yourUserId: userId
     });
     
-    console.log(`Room ${roomId} now has users:`, Array.from(roomUsers[roomId]));
+    console.log(`Room ${roomId} now has users:`, usersArray);
+    
+    // Share user info with others in the room
+    if (userNames[userId]) {
+      socket.to(roomId).emit('user-info', {
+        userId: userId,
+        userName: userNames[userId]
+      });
+      console.log(`📢 Shared user info: ${userId} -> ${userNames[userId]}`);
+    }
     
     // If this is the second user joining, notify the first user to start call
     if (roomUsers[roomId].size === 2) {
-      socket.to(roomId).emit('partner-joined', { userId });
+      socket.to(roomId).emit('partner-joined', { 
+        userId,
+        userName: userNames[userId] || `User-${userId.substr(0, 8)}`
+      });
       console.log(`Partner joined room ${roomId}, notifying other users`);
     }
   });
@@ -201,21 +238,60 @@ io.on('connection', (socket) => {
     socket.to(roomId).emit('offer-requested', { from: socket.id });
   });
 
+  // Share user info with room - NEW EVENT
+  socket.on('share-user-info', (data) => {
+    const { roomId, userId, userName } = data;
+    console.log(`User ${userId} sharing info in room ${roomId}: ${userName}`);
+    
+    // Store the user name
+    if (userName) {
+      userNames[userId] = userName;
+    }
+    
+    // Broadcast to other users in the room
+    socket.to(roomId).emit('user-info', {
+      userId: userId,
+      userName: userName || userNames[userId] || `User-${userId.substr(0, 8)}`
+    });
+  });
+
+  // Get user info - NEW EVENT
+  socket.on('get-user-info', (data) => {
+    const { userId } = data;
+    const userName = userNames[userId];
+    
+    if (userName) {
+      socket.emit('user-info-response', {
+        userId: userId,
+        userName: userName
+      });
+      console.log(`✅ Sent user info for ${userId}: ${userName}`);
+    } else {
+      socket.emit('user-info-response', {
+        userId: userId,
+        userName: `User-${userId.substr(0, 8)}`
+      });
+      console.log(`⚠️ No user name found for ${userId}, using fallback`);
+    }
+  });
+
   // Leave room - IMPROVED
-  socket.on('leave-room', ({ roomId }) => {
-    console.log(`Socket ${socket.id} leaving room ${roomId}`);
+  socket.on('leave-room', ({ roomId, userId }) => {
+    const leaveUserId = userId || socket.userId;
+    console.log(`User ${leaveUserId} leaving room ${roomId}`);
+    
     socket.leave(roomId);
     
     // Remove from room tracking
-    if (roomUsers[roomId] && socket.userId) {
-      roomUsers[roomId].delete(socket.userId);
+    if (roomUsers[roomId] && leaveUserId) {
+      roomUsers[roomId].delete(leaveUserId);
       if (roomUsers[roomId].size === 0) {
         delete roomUsers[roomId];
       }
     }
     
     socket.to(roomId).emit('user-left', { 
-      userId: socket.userId, 
+      userId: leaveUserId, 
       socketId: socket.id 
     });
   });
@@ -230,7 +306,9 @@ io.on('connection', (socket) => {
       
       if (userSockets[uid].length === 0) {
         delete userSockets[uid];
-        console.log(`Removed all sockets for user ${uid}`);
+        // Also remove from userNames if no sockets left
+        delete userNames[uid];
+        console.log(`Removed all sockets and user info for user ${uid}`);
       } else {
         console.log(`User ${uid} has ${userSockets[uid].length} sockets remaining`);
       }
@@ -247,8 +325,12 @@ app.get('/api/debug/connected-users', (req, res) => {
   res.json({
     connectedUsers: Object.keys(userSockets).length,
     userSockets: userSockets,
+    userNames: userNames,
     activeRooms: Object.keys(roomUsers).reduce((acc, roomId) => {
-      acc[roomId] = Array.from(roomUsers[roomId]);
+      acc[roomId] = Array.from(roomUsers[roomId]).map(userId => ({
+        userId: userId,
+        userName: userNames[userId] || 'Unknown'
+      }));
       return acc;
     }, {})
   });
@@ -259,7 +341,7 @@ const PORT = process.env.PORT || 5000;
 
 // Connect to MongoDB
 async function start() {
-  const mongoUri = process.env.MONGO_URI || "mongodb+srv://arun:arunprakash@skill.tbufvet.mongodb.net/?retryWrites=true&w=majority&appName=skill";
+  const mongoUri = process.env.MONGO_URI || "mongodb+srv://arun:arunprakash@skill.tbufvet.mongodb.net/?retryWrites=true&w=majority&appAppName=skill";
   try {
     await mongoose.connect(mongoUri);
     console.log('✅ Connected to MongoDB');
