@@ -55,7 +55,7 @@ router.post('/start', auth, async (req, res) => {
         
         console.log(`Incoming call notification sent to partner: ${partnerId}`);
       } else {
-        console.log(`Partner ${partnerId} not connected via socket. Available users:`, Object.keys(userSockets));
+        console.log(`Partner ${partnerId} not connected via socket. Available users:`, Object.keys(userSockets || {}));
       }
     } catch(e) { 
       console.error('Failed to emit incoming-call', e);

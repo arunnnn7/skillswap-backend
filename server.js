@@ -29,7 +29,6 @@ const allowedOrigins = [
 
 app.use(cors({ 
   origin: function (origin, callback) {
-    // Allow requests with no origin (like mobile apps or curl requests)
     if (!origin) return callback(null, true);
     
     if (allowedOrigins.includes(origin) || origin.endsWith('.vercel.app')) {
@@ -77,13 +76,17 @@ const io = new Server(server, {
     credentials: true,
     allowedHeaders: ['*']
   },
-  // Add these for better connection stability
   pingTimeout: 60000,
   pingInterval: 25000
 });
 
 const userSockets = {};
+const roomUsers = {}; // Track users in rooms
+const activeCalls = {}; // Track active calls
+
 app.set('userSockets', userSockets);
+app.set('roomUsers', roomUsers);
+app.set('activeCalls', activeCalls);
 app.set('io', io);
 
 io.on('connection', (socket) => {
@@ -95,43 +98,68 @@ io.on('connection', (socket) => {
     
     console.log(`Registering user ${userId} with socket ${socket.id}`);
     
-    // Initialize user's socket array if it doesn't exist
     if (!userSockets[userId]) {
       userSockets[userId] = [];
     }
     
-    // Add socket if not already present
     if (!userSockets[userId].includes(socket.id)) {
       userSockets[userId].push(socket.id);
     }
     
     socket.userId = userId;
-    
     console.log(`User ${userId} now has ${userSockets[userId].length} sockets`);
   });
 
-  // Join a video room
-  socket.on('join-room', ({ roomId, userId, userData }) => {
+  // Join a video room - IMPROVED VERSION
+  socket.on('join-room', ({ roomId, userId }) => {
     console.log(`User ${userId} joining room ${roomId}`);
     
     socket.join(roomId);
     
+    // Track room users
+    if (!roomUsers[roomId]) {
+      roomUsers[roomId] = new Set();
+    }
+    roomUsers[roomId].add(userId);
+    
     // Notify others in the room
     socket.to(roomId).emit('user-joined', { 
-      userId, 
-      userData,
+      userId,
       socketId: socket.id 
     });
     
-    // Acknowledge join
-    socket.emit('joined-room', { roomId, success: true });
+    // Acknowledge join with room info
+    socket.emit('joined-room', { 
+      roomId, 
+      success: true,
+      usersInRoom: Array.from(roomUsers[roomId]),
+      isCaller: roomUsers[roomId].size === 1 // First user is caller
+    });
+    
+    console.log(`Room ${roomId} now has users:`, Array.from(roomUsers[roomId]));
+    
+    // If this is the second user joining, notify the first user to start call
+    if (roomUsers[roomId].size === 2) {
+      socket.to(roomId).emit('partner-joined', { userId });
+      console.log(`Partner joined room ${roomId}, notifying other users`);
+    }
   });
 
-  // WebRTC signaling
-  socket.on('webrtc-signal', ({ roomId, type, offer, answer, candidate }) => {
-    console.log(`WebRTC signal in room ${roomId}: ${type}`);
+  // WebRTC signaling - IMPROVED VERSION
+  socket.on('webrtc-signal', (data) => {
+    const { roomId, type, offer, answer, candidate } = data;
+    console.log(`WebRTC signal in room ${roomId}: ${type} from ${socket.id}`);
     
-    // Broadcast to other users in the room
+    // Log signal details for debugging
+    if (type === 'offer') {
+      console.log('📤 Offer being relayed to room:', roomId);
+    } else if (type === 'answer') {
+      console.log('📥 Answer being relayed to room:', roomId);
+    } else if (type === 'candidate') {
+      console.log('🔄 ICE candidate being relayed');
+    }
+    
+    // Broadcast to other users in the room (excluding sender)
     socket.to(roomId).emit('webrtc-signal', {
       type,
       offer,
@@ -141,23 +169,55 @@ io.on('connection', (socket) => {
     });
   });
 
-  // Legacy signal handler (for backward compatibility)
-  socket.on('signal', ({ roomId, data }) => {
-    console.log(`Legacy signal in room ${roomId}`);
-    socket.to(roomId).emit('signal', data);
-  });
-
   // Handle incoming call notifications
   socket.on('incoming-call-response', ({ roomId, accepted, userId }) => {
     console.log(`Incoming call response from ${userId}: ${accepted ? 'accepted' : 'rejected'}`);
     socket.to(roomId).emit('call-response', { accepted, userId });
   });
 
-  // Leave room
+  // Call initiation - NEW EVENT
+  socket.on('initiate-call', ({ roomId, offer, toUserId }) => {
+    console.log(`Call initiation in room ${roomId} to user ${toUserId}`);
+    
+    // Send offer to specific user
+    if (userSockets[toUserId]) {
+      userSockets[toUserId].forEach(sid => {
+        io.to(sid).emit('webrtc-signal', {
+          type: 'offer',
+          offer: offer,
+          roomId: roomId,
+          from: socket.id
+        });
+        console.log(`📤 Offer sent to user ${toUserId} via socket ${sid}`);
+      });
+    } else {
+      console.log(`❌ User ${toUserId} not connected for call initiation`);
+    }
+  });
+
+  // Request offer from caller (for answerer)
+  socket.on('request-offer', ({ roomId }) => {
+    console.log(`User ${socket.id} requesting offer in room ${roomId}`);
+    socket.to(roomId).emit('offer-requested', { from: socket.id });
+  });
+
+  // Leave room - IMPROVED
   socket.on('leave-room', ({ roomId }) => {
     console.log(`Socket ${socket.id} leaving room ${roomId}`);
     socket.leave(roomId);
-    socket.to(roomId).emit('user-left', { userId: socket.userId, socketId: socket.id });
+    
+    // Remove from room tracking
+    if (roomUsers[roomId] && socket.userId) {
+      roomUsers[roomId].delete(socket.userId);
+      if (roomUsers[roomId].size === 0) {
+        delete roomUsers[roomId];
+      }
+    }
+    
+    socket.to(roomId).emit('user-left', { 
+      userId: socket.userId, 
+      socketId: socket.id 
+    });
   });
 
   // Handle disconnection
@@ -166,10 +226,8 @@ io.on('connection', (socket) => {
     
     const uid = socket.userId;
     if (uid && userSockets[uid]) {
-      // Remove this socket from user's sockets
       userSockets[uid] = userSockets[uid].filter(sid => sid !== socket.id);
       
-      // Clean up if no sockets left for this user
       if (userSockets[uid].length === 0) {
         delete userSockets[uid];
         console.log(`Removed all sockets for user ${uid}`);
@@ -179,21 +237,24 @@ io.on('connection', (socket) => {
     }
   });
 
-  // Error handling
   socket.on('error', (error) => {
     console.error('Socket error:', error);
   });
 });
 
-// Debug endpoint to check connected users
+// Debug endpoint to check connected users and rooms
 app.get('/api/debug/connected-users', (req, res) => {
   res.json({
     connectedUsers: Object.keys(userSockets).length,
-    userSockets: userSockets
+    userSockets: userSockets,
+    activeRooms: Object.keys(roomUsers).reduce((acc, roomId) => {
+      acc[roomId] = Array.from(roomUsers[roomId]);
+      return acc;
+    }, {})
   });
 });
 
-// Production port - REMOVE THE VERCEL CODE
+// Production port
 const PORT = process.env.PORT || 5000;
 
 // Connect to MongoDB
