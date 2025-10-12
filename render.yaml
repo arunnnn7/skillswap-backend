@@ -1,0 +1,13 @@
+services:
+  - type: web
+    name: skillswap-backend
+    env: node
+    buildCommand: npm install
+    startCommand: npm start
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: MONGO_URI
+        value: mongodb+srv://arun:arunprakash@skill.tbufvet.mongodb.net/?retryWrites=true&w=majority&appName=skill
+      - key: JWT_SECRET
+        generateValue: true
