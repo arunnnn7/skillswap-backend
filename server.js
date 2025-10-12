@@ -81,14 +81,12 @@ const io = new Server(server, {
 });
 
 const userSockets = {};
-const roomUsers = {}; // Track users in rooms
-const userNames = {}; // Track user names for display
-const activeCalls = {}; // Track active calls
+const roomUsers = {};
+const userNames = {};
 
 app.set('userSockets', userSockets);
 app.set('roomUsers', roomUsers);
 app.set('userNames', userNames);
-app.set('activeCalls', activeCalls);
 app.set('io', io);
 
 io.on('connection', (socket) => {
@@ -118,16 +116,15 @@ io.on('connection', (socket) => {
     console.log(`User ${userId} now has ${userSockets[userId].length} sockets`);
   });
 
-  // Join a video room - IMPROVED VERSION
+  // Join a video room
   socket.on('join-room', ({ roomId, userId, userName }) => {
-    // Validate user ID
-    if (!userId || userId === 'anonymous' || userId === 'undefined' || userId === 'null') {
-      console.error(`❌ Invalid user ID attempted to join room ${roomId}:`, userId);
+    if (!userId || userId === 'anonymous') {
+      console.error(`❌ Invalid user ID:`, userId);
       socket.emit('join-error', { error: 'Invalid user ID' });
       return;
     }
     
-    console.log(`User ${userId} (${userName || 'unknown'}) joining room ${roomId}`);
+    console.log(`User ${userId} joining room ${roomId}`);
     
     socket.join(roomId);
     
@@ -137,66 +134,57 @@ io.on('connection', (socket) => {
     }
     roomUsers[roomId].add(userId);
     
-    // Store user name if provided
+    // Store user name
     if (userName) {
       userNames[userId] = userName;
     }
     
-    // Notify others in the room with user info
+    // Get all users in room for response
+    const usersInRoom = Array.from(roomUsers[roomId]);
+    const isCaller = usersInRoom.length === 1;
+    
+    console.log(`Room ${roomId} now has users:`, usersInRoom);
+    
+    // Notify others in the room
     socket.to(roomId).emit('user-joined', { 
       userId,
       userName: userNames[userId] || `User-${userId.substr(0, 8)}`,
       socketId: socket.id 
     });
     
-    // Acknowledge join with room info
-    const usersArray = Array.from(roomUsers[roomId]);
-    const isCaller = usersArray.length === 1; // First user is caller
-    
+    // Acknowledge join
     socket.emit('joined-room', { 
       roomId, 
       success: true,
-      usersInRoom: usersArray,
+      usersInRoom: usersInRoom,
       isCaller: isCaller,
       yourUserId: userId
     });
     
-    console.log(`Room ${roomId} now has users:`, usersArray);
-    
-    // Share user info with others in the room
-    if (userNames[userId]) {
-      socket.to(roomId).emit('user-info', {
-        userId: userId,
-        userName: userNames[userId]
-      });
-      console.log(`📢 Shared user info: ${userId} -> ${userNames[userId]}`);
-    }
-    
-    // If this is the second user joining, notify the first user to start call
+    // If second user joined, notify first user
     if (roomUsers[roomId].size === 2) {
       socket.to(roomId).emit('partner-joined', { 
         userId,
         userName: userNames[userId] || `User-${userId.substr(0, 8)}`
       });
-      console.log(`Partner joined room ${roomId}, notifying other users`);
+      console.log(`🚀 Partner joined - room ready for call`);
     }
+    
+    // Share user info with others
+    setTimeout(() => {
+      socket.to(roomId).emit('user-info', {
+        userId: userId,
+        userName: userNames[userId] || `User-${userId.substr(0, 8)}`
+      });
+    }, 500);
   });
 
-  // WebRTC signaling - IMPROVED VERSION
+  // WebRTC signaling - SIMPLIFIED AND FIXED
   socket.on('webrtc-signal', (data) => {
     const { roomId, type, offer, answer, candidate } = data;
-    console.log(`WebRTC signal in room ${roomId}: ${type} from ${socket.id}`);
+    console.log(`📡 WebRTC signal in ${roomId}: ${type} from ${socket.id}`);
     
-    // Log signal details for debugging
-    if (type === 'offer') {
-      console.log('📤 Offer being relayed to room:', roomId);
-    } else if (type === 'answer') {
-      console.log('📥 Answer being relayed to room:', roomId);
-    } else if (type === 'candidate') {
-      console.log('🔄 ICE candidate being relayed');
-    }
-    
-    // Broadcast to other users in the room (excluding sender)
+    // Broadcast to other users in the room
     socket.to(roomId).emit('webrtc-signal', {
       type,
       offer,
@@ -206,83 +194,34 @@ io.on('connection', (socket) => {
     });
   });
 
-  // Handle incoming call notifications
-  socket.on('incoming-call-response', ({ roomId, accepted, userId }) => {
-    console.log(`Incoming call response from ${userId}: ${accepted ? 'accepted' : 'rejected'}`);
-    socket.to(roomId).emit('call-response', { accepted, userId });
-  });
-
-  // Call initiation - NEW EVENT
-  socket.on('initiate-call', ({ roomId, offer, toUserId }) => {
-    console.log(`Call initiation in room ${roomId} to user ${toUserId}`);
-    
-    // Send offer to specific user
-    if (userSockets[toUserId]) {
-      userSockets[toUserId].forEach(sid => {
-        io.to(sid).emit('webrtc-signal', {
-          type: 'offer',
-          offer: offer,
-          roomId: roomId,
-          from: socket.id
-        });
-        console.log(`📤 Offer sent to user ${toUserId} via socket ${sid}`);
-      });
-    } else {
-      console.log(`❌ User ${toUserId} not connected for call initiation`);
-    }
-  });
-
-  // Request offer from caller (for answerer)
+  // Request offer from caller
   socket.on('request-offer', ({ roomId }) => {
-    console.log(`User ${socket.id} requesting offer in room ${roomId}`);
+    console.log(`📨 User ${socket.id} requesting offer in room ${roomId}`);
     socket.to(roomId).emit('offer-requested', { from: socket.id });
   });
 
-  // Share user info with room - NEW EVENT
+  // Share user info
   socket.on('share-user-info', (data) => {
     const { roomId, userId, userName } = data;
-    console.log(`User ${userId} sharing info in room ${roomId}: ${userName}`);
+    console.log(`👤 User ${userId} sharing name: ${userName}`);
     
-    // Store the user name
     if (userName) {
       userNames[userId] = userName;
     }
     
-    // Broadcast to other users in the room
     socket.to(roomId).emit('user-info', {
       userId: userId,
       userName: userName || userNames[userId] || `User-${userId.substr(0, 8)}`
     });
   });
 
-  // Get user info - NEW EVENT
-  socket.on('get-user-info', (data) => {
-    const { userId } = data;
-    const userName = userNames[userId];
-    
-    if (userName) {
-      socket.emit('user-info-response', {
-        userId: userId,
-        userName: userName
-      });
-      console.log(`✅ Sent user info for ${userId}: ${userName}`);
-    } else {
-      socket.emit('user-info-response', {
-        userId: userId,
-        userName: `User-${userId.substr(0, 8)}`
-      });
-      console.log(`⚠️ No user name found for ${userId}, using fallback`);
-    }
-  });
-
-  // Leave room - IMPROVED
+  // Leave room
   socket.on('leave-room', ({ roomId, userId }) => {
     const leaveUserId = userId || socket.userId;
     console.log(`User ${leaveUserId} leaving room ${roomId}`);
     
     socket.leave(roomId);
     
-    // Remove from room tracking
     if (roomUsers[roomId] && leaveUserId) {
       roomUsers[roomId].delete(leaveUserId);
       if (roomUsers[roomId].size === 0) {
@@ -306,33 +245,9 @@ io.on('connection', (socket) => {
       
       if (userSockets[uid].length === 0) {
         delete userSockets[uid];
-        // Also remove from userNames if no sockets left
         delete userNames[uid];
-        console.log(`Removed all sockets and user info for user ${uid}`);
-      } else {
-        console.log(`User ${uid} has ${userSockets[uid].length} sockets remaining`);
       }
     }
-  });
-
-  socket.on('error', (error) => {
-    console.error('Socket error:', error);
-  });
-});
-
-// Debug endpoint to check connected users and rooms
-app.get('/api/debug/connected-users', (req, res) => {
-  res.json({
-    connectedUsers: Object.keys(userSockets).length,
-    userSockets: userSockets,
-    userNames: userNames,
-    activeRooms: Object.keys(roomUsers).reduce((acc, roomId) => {
-      acc[roomId] = Array.from(roomUsers[roomId]).map(userId => ({
-        userId: userId,
-        userName: userNames[userId] || 'Unknown'
-      }));
-      return acc;
-    }, {})
   });
 });
 
@@ -341,7 +256,7 @@ const PORT = process.env.PORT || 5000;
 
 // Connect to MongoDB
 async function start() {
-  const mongoUri = process.env.MONGO_URI || "mongodb+srv://arun:arunprakash@skill.tbufvet.mongodb.net/?retryWrites=true&w=majority&appAppName=skill";
+  const mongoUri = process.env.MONGO_URI || "mongodb+srv://arun:arunprakash@skill.tbufvet.mongodb.net/?retryWrites=true&w=majority&appName=skill";
   try {
     await mongoose.connect(mongoUri);
     console.log('✅ Connected to MongoDB');
