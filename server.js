@@ -68,7 +68,7 @@ app.get('/api/health', (req, res) => res.send({
   environment: process.env.NODE_ENV || 'production'
 }));
 
-// Socket.io for WebRTC signaling
+// Socket.io for WebRTC signaling - OPTIMIZED FOR STABILITY
 const io = new Server(server, {
   cors: {
     origin: allowedOrigins,
@@ -76,8 +76,17 @@ const io = new Server(server, {
     credentials: true,
     allowedHeaders: ['*']
   },
-  pingTimeout: 60000,
-  pingInterval: 25000
+  // Optimized timeout settings for stable connections
+  pingTimeout: 30000,        // 30 seconds - time to wait for pong response
+  pingInterval: 20000,       // 20 seconds - interval between pings
+  upgradeTimeout: 10000,     // 10 seconds - timeout for upgrade to websocket
+  allowEIO3: true,           // Allow Engine.IO v3 clients
+  transports: ['websocket', 'polling'],
+  // Connection state management
+  connectionStateRecovery: {
+    maxDisconnectionDuration: 2 * 60 * 1000, // 2 minutes
+    skipMiddlewares: true
+  }
 });
 
 const userSockets = {};
@@ -90,7 +99,17 @@ app.set('userNames', userNames);
 app.set('io', io);
 
 io.on('connection', (socket) => {
-  console.log('Socket connected:', socket.id);
+  console.log('🔌 Socket connected:', socket.id);
+  
+  // Connection health monitoring
+  socket.on('ping', () => {
+    socket.emit('pong');
+  });
+  
+  // Handle connection errors
+  socket.on('error', (error) => {
+    console.error('❌ Socket error:', socket.id, error);
+  });
 
   // Register user with their socket
   socket.on('register-user', ({ userId, userName }) => {
@@ -235,9 +254,9 @@ io.on('connection', (socket) => {
     });
   });
 
-  // Handle disconnection
+  // Handle disconnection with enhanced logging
   socket.on('disconnect', (reason) => {
-    console.log('Socket disconnected:', socket.id, 'Reason:', reason);
+    console.log('🔌 Socket disconnected:', socket.id, 'Reason:', reason);
     
     const uid = socket.userId;
     if (uid && userSockets[uid]) {
@@ -246,8 +265,29 @@ io.on('connection', (socket) => {
       if (userSockets[uid].length === 0) {
         delete userSockets[uid];
         delete userNames[uid];
+        console.log(`🗑️ Cleaned up user data for ${uid}`);
+      } else {
+        console.log(`👤 User ${uid} still has ${userSockets[uid].length} active sockets`);
       }
     }
+    
+    // Clean up room data if user was in a room
+    Object.keys(roomUsers).forEach(roomId => {
+      if (roomUsers[roomId] && roomUsers[roomId].has(uid)) {
+        roomUsers[roomId].delete(uid);
+        if (roomUsers[roomId].size === 0) {
+          delete roomUsers[roomId];
+          console.log(`🗑️ Cleaned up empty room ${roomId}`);
+        } else {
+          // Notify remaining users
+          socket.to(roomId).emit('user-left', { 
+            userId: uid, 
+            socketId: socket.id,
+            reason: reason
+          });
+        }
+      }
+    });
   });
 });
 
